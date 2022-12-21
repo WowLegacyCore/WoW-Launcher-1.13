@@ -8,7 +8,7 @@ class ModLoader
 {
     static readonly HashSet<uint> loadedFileIds = new();
 
-    public static bool HookClient(WinMemory memory, nint processHandle, nint idAlloc, nint stringAlloc)
+    public static bool HookClient(WinMemory memory, nint processHandle, nint idAlloc, nint stringAlloc, (int Major, int Minor, int Revision, int Build) clientVersion)
     {
         var asm = new byte[]
         {
@@ -26,13 +26,16 @@ class ModLoader
         Buffer.BlockCopy(BitConverter.GetBytes(trampolineInjectAddress), 0, hookInstructions, 2, 8);
 
         // Inside the file load func!!!
-        var hookAddress = memory.Data.FindPattern(Patterns.Windows.CustomFileIdHook);
+        var hookAddress = memory.Data.FindPattern(
+            clientVersion is (1, 13, _, _ )
+                ? Patterns.Windows.CustomFileIdHook13
+                : Patterns.Windows.CustomFileIdHook);
 
         if (hookAddress == 0)
             return false;
 
         // Read original data from the hook function.
-        var originalBytes = memory.Read(memory.BaseAddress + hookAddress, 13);
+        var originalBytes = memory.Read(memory.BaseAddress + hookAddress, clientVersion is (1, 13, _, _ ) ? 15 : 13);
 
         // Apply the hook.
         memory.QueuePatch(hookAddress, hookInstructions, "CustomFileIdHook");

@@ -6,6 +6,7 @@ enum GameVersion
 {
     Retail,
     Classic,
-    ClassicEra
+    ClassicEra,
+    Classic132,
+    Classic133,
 }
-

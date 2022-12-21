@@ -21,6 +21,8 @@ class Launcher
             GameVersion.Retail => ("_retail_", "Wow.exe", new[] { 9, 10 }, 37862),
             GameVersion.Classic => ("_classic_", "WowClassic.exe", new[] { 2, 3 }, 39926),
             GameVersion.ClassicEra => ("_classic_era_", "WowClassic.exe", new[] { 1 }, 40347),
+            GameVersion.Classic132 => ("_classic_", "Wow.exe", new[] { 1, 13, 2 }, 31650),
+            GameVersion.Classic133 => ("_classic_", "WowClassic.exe", new[] { 1, 13, 3 }, 32790),
 #elif ARM64
             GameVersion.Retail => ("_retail_", "Wow-ARM64.exe", new[] { 9, 10 }, 37862),
             GameVersion.Classic => ("_classic_", "WowClassic-arm64.exe", new[] { 2, 3 }, 39926),
@@ -127,10 +129,17 @@ class Launcher
                 {
                     NativeWindows.NtSuspendProcess(processInfo.ProcessHandle);
 
-                    byte[] certBundleData = Convert.FromBase64String(Patches.Common.CertBundleData);
-
                     // Build the version URL from the game binary build.
                     var clientVersion = GetVersionValueFromClient(appPath);
+                    if (useStaticAuthSeed && clientVersion is (1, 13, _, _))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine("Static seed is not supported for 1.13");
+                        Console.ResetColor();
+                        NativeWindows.TerminateProcess(processInfo.ProcessHandle, 0);
+                        return false;
+                    }
+
                     byte[] versionPatch = Patches.Common.GetVersionUrl(clientVersion.Build);
 
                     // Refresh the client data before patching.
@@ -142,7 +151,6 @@ class Launcher
                     // Wait for all direct memory patch tasks to complete,
                     Task.WaitAll(new[]
                     {
-                        memory.PatchMemory(Patterns.Common.CertBundle, certBundleData, "Certificate Bundle"),
                         memory.PatchMemory(Patterns.Common.SignatureModulus, Patches.Common.SignatureModulus, "Certificate Signature RsaModulus"),
                         memory.PatchMemory(Patterns.Common.ConnectToModulus, Patches.Common.RsaModulus, "ConnectTo RsaModulus"),
 
@@ -158,14 +166,40 @@ class Launcher
 
                     NativeWindows.NtResumeProcess(processInfo.ProcessHandle);
 
-                    WaitForUnpack(ref processInfo, memory, ref mbi, gameAppData);
+                    WaitForUnpack(ref processInfo, memory, ref mbi);
 
 #if x64
-                    Task.WaitAll(new[]
+                    byte[] certBundleData = Convert.FromBase64String(Patches.Common.CertBundleData);
+
+                    if (clientVersion is (1, 13, _, _))
                     {
-                        memory.QueuePatch(Patterns.Windows.CertBundle, Patches.Windows.CertBundle, "CertBundle"),
-                        memory.QueuePatch(Patterns.Windows.CertCommonName, Patches.Windows.CertCommonName, "CertCommonName", 5)
-                    }, CancellationTokenSource.Token);
+                        // In 1.13 there is no embedded fallback caBundle,
+                        // so we are allocating our own caBundle and patching the "SetNewCertBundle" so it always receives our bundle as an argument 
+                        ulong ourCaBundleVector = AllocateCustomCertificateDataVector(processInfo.ProcessHandle, certBundleData);
+                        Console.WriteLine($"Injected ourCaBundleVector at: 0x{ourCaBundleVector:X16}");
+
+                        var callToSetNewCertBundle = memory.Data.FindPattern(Patterns.Windows.CallToSetNewCertBundle);
+                        var callOffsetValue = BitConverter.ToInt32(memory.Data, (int)(callToSetNewCertBundle + 1)) + 5;
+                        var setNewCertBundleStartAddr = callToSetNewCertBundle + callOffsetValue;
+                        var toBePatchedAddr = setNewCertBundleStartAddr + 0x21; // mov rdi, rcx // And we want to inject into rdi our own value
+
+                        var replaceArgPatch = Patches.Windows.UseCustomBundleAsArgument(ourCaBundleVector, 267);
+
+                        memory.QueuePatch(toBePatchedAddr, replaceArgPatch, "Replace SetNewCertBundle argument to our caBundle").Wait();
+                    }
+                    else
+                    {
+                        memory.PatchMemory(Patterns.Common.CertBundleData, certBundleData, "Certificate Bundle Data").Wait();
+                        Task.WaitAll(new[]
+                        {
+                            // Force fail the CASC Load of "ca_bundle.txt.signed" so it is using the embedded certificate
+                            memory.QueuePatch(Patterns.Windows.CertBundle, Patches.Windows.CertBundle, "Certificate Bundle LoadFromCasc force fail"),
+
+                            // Patch the verifyCertFunction to accept any certificate
+                            // All "return false" of this function will jmp to the same code. This will patch the code to always "return true"
+                            memory.QueuePatch(Patterns.Windows.CertCommonName, Patches.Windows.CertCommonName, "CertCommonName", 5)
+                        }, CancellationTokenSource.Token);
+                    }
 
                     if (useStaticAuthSeed)
                     {
@@ -184,20 +218,22 @@ class Launcher
 #if CUSTOM_FILES
                     Task.WaitAll(new[]
                     {
-                        (clientVersion is (10, _, _, _))
-                        ? memory.QueuePatch(Patterns.Windows.LoadByFileIdAlternate, Patches.Windows.NoJump, "LoadByFileId", 3)
-                        : memory.QueuePatch(Patterns.Windows.LoadByFileId, Patches.Windows.NoJump, "LoadByFileId", 6),
+                        (clientVersion is (10, _, _, _) or (1, 13, _, _))
+                            ? memory.QueuePatch(Patterns.Windows.LoadByFileIdAlternate, Patches.Windows.NoJump, "LoadByFileId", 3)
+                            : memory.QueuePatch(Patterns.Windows.LoadByFileId, Patches.Windows.NoJump, "LoadByFileId", 6),
 
-                        (clientVersion is (10, _, _, _))
-                        ? memory.QueuePatch(Patterns.Windows.LoadByFilePathAlternate, Patches.Windows.NoJump, "LoadByFilePath", 3)
-                        : memory.QueuePatch(Patterns.Windows.LoadByFilePath, Patches.Windows.NoJump, "LoadByFilePath", 3)
+                        (clientVersion is (1, 13, _, _))
+                            ? memory.QueuePatch(Patterns.Windows.LoadByFilePathAlternate13, Patches.Windows.NoJump, "LoadByFilePath", 5)
+                            : (clientVersion is (10, _, _, _))
+                                  ? memory.QueuePatch(Patterns.Windows.LoadByFilePathAlternate, Patches.Windows.NoJump, "LoadByFilePath", 3)
+                                  : memory.QueuePatch(Patterns.Windows.LoadByFilePath, Patches.Windows.NoJump, "LoadByFilePath", 3)
                     }, CancellationTokenSource.Token);
 
                     var (idAlloc, stringAlloc) = ModLoader.LoadFileMappings(processInfo.ProcessHandle);
 
                     if (idAlloc != 0 && stringAlloc != 0)
                     {
-                        if (!ModLoader.HookClient(memory, processInfo.ProcessHandle, idAlloc, stringAlloc))
+                        if (!ModLoader.HookClient(memory, processInfo.ProcessHandle, idAlloc, stringAlloc, clientVersion))
                             return false;
                     }
 #endif
@@ -205,9 +241,9 @@ class Launcher
 #elif ARM64
                     Task.WaitAll(new[]
                     {
-                        memory.QueuePatch(Patterns.Windows.CertBundle, Patches.Windows.Branch, "CertBundle", 19),
+                        memory.QueuePatch(Patterns.Windows.CertBundle, Patches.Windows.CertBundle, "CertBundle", 19),
                         memory.QueuePatch(Patterns.Windows.CertCommonName, Patches.Windows.CertCommonName, "CertCommonName", 6),
-                    }, CancellationTokenSource.Token);
+                    }, Program.CancellationTokenSource.Token);
 #endif
 
                     NativeWindows.NtResumeProcess(processInfo.ProcessHandle);
@@ -252,31 +288,27 @@ class Launcher
 
     static long GenerateAuthSeedFunctionPatch(WinMemory memory, long modulusOffset)
     {
-#if x64
+        // will find the static ARG value of "call authSeedVersionSetter(ARG)" (is always mov ecx, 0x57 0x6F 0x57 0x00)
         var authSeedLoadOffset = memory.Data.FindPattern(Patterns.Windows.AuthSeed);
 
         if (authSeedLoadOffset == 0)
             throw new InvalidDataException("authSeedLoadOffset");
 
-        var leaStartOffset = authSeedLoadOffset + 9;
-        var leaValue = Unsafe.ReadUnaligned<int>(ref memory.Data[leaStartOffset + 3]);
-        var authSeedWrapperOffset = leaStartOffset + leaValue + 7;
-        var jmpValue = Unsafe.ReadUnaligned<uint>(ref memory.Data[authSeedWrapperOffset + 6]);
-        var authSeedFunctionOffset = authSeedWrapperOffset + 5 + jmpValue + 5;
+        var leaStartOffset = authSeedLoadOffset + 9;                                            // lea rcx = authSeedWrapper
+        var leaValue = Unsafe.ReadUnaligned<int>(ref memory.Data[leaStartOffset + 3]);          // get authSeedWrapper rel offset
+        var authSeedWrapperOffset = leaStartOffset + leaValue + 7;                              // go into authSeedWrapper 
+        var jmpValue = Unsafe.ReadUnaligned<uint>(ref memory.Data[authSeedWrapperOffset + 6]);  // read jmp offset to authSeedFunction
+        var authSeedFunctionOffset = authSeedWrapperOffset + 5 + jmpValue + 5;                  // Go into auth seed function
 
         // Write the modulus offset to our custom get seed functions.
         // Resulting static auth seed is: 179D3DC3235629D07113A9B3867F97A7
         Unsafe.WriteUnaligned(ref Patches.Windows.AuthSeed[3], (uint)(modulusOffset - authSeedFunctionOffset - 7));
 
         return authSeedFunctionOffset;
-#else
-        throw new NotImplementedException();
-#endif
     }
 
-    static void WaitForUnpack(ref ProcessInformation processInfo, WinMemory memory, ref MemoryBasicInformation mbi, Stream gameAppData)
+    static void WaitForUnpack(ref ProcessInformation processInfo, WinMemory memory, ref MemoryBasicInformation mbi)
     {
-#if x64
         // Wait for client initialization.
         var initOffset = memory?.Read(mbi.BaseAddress, (int)mbi.RegionSize)?.FindPattern(Patterns.Windows.Init) ?? 0;
 
@@ -292,23 +324,7 @@ class Launcher
         while (memory?.Read(initOffset + memory.BaseAddress, 1)?[0] == null ||
                memory?.Read(initOffset + memory.BaseAddress, 1)?[0] == 0)
             memory.Data = memory.Read(mbi.BaseAddress, (int)mbi.RegionSize);
-#else
-        // Get PE header info for client initialization.
-        var peHeaders = new PEHeaders(gameAppData);
 
-        SectionHeader textSectionHeader = peHeaders.SectionHeaders.Single(sectionHeader => sectionHeader.Name.ToLower() == ".text");
-
-        gameAppData.Position = textSectionHeader.VirtualSize + textSectionHeader.PointerToRawData;
-
-        var textSectionEndValue = gameAppData.ReadByte();
-
-        Console.WriteLine("Waiting for client initialization...");
-
-        var virtualTextSectionEnd = memory.BaseAddress + textSectionHeader.VirtualAddress + textSectionHeader.VirtualSize;
-
-        while (memory?.Read(virtualTextSectionEnd, 1)?[0] == null || memory?.Read(virtualTextSectionEnd, 1)?[0] == textSectionEndValue)
-            Thread.Sleep(100);
-#endif
         PrepareAntiCrash(memory, ref mbi, ref processInfo);
 
         memory.RefreshMemoryData((int)mbi.RegionSize);
@@ -406,5 +422,30 @@ class Launcher
 
             lastAddress = (int)a;
         }
+    }
+
+    static ulong AllocateCustomCertificateDataVector(nint processHandle, byte[] caBundleData)
+    {
+        var addr = NativeWindows.VirtualAllocEx(processHandle, IntPtr.Zero, (uint) caBundleData.Length + 128, 0x00001000, 0x04);
+
+        /* struct DataVector {
+            uint8_t* data;
+            uint32_t size;
+        } */
+        const byte fill = 0;
+        byte[] storageVectorStruct =
+        {
+            fill, fill, fill, fill, fill, fill, fill, fill, // data ptr
+            fill, fill, fill, fill, // size
+        };
+        Unsafe.WriteUnaligned(ref storageVectorStruct[0], (ulong) (addr + 128));
+        Unsafe.WriteUnaligned(ref storageVectorStruct[8], caBundleData.Length);
+        NativeWindows.WriteProcessMemory(processHandle, addr + 64, storageVectorStruct, storageVectorStruct.Length, out _);
+
+        NativeWindows.WriteProcessMemory(processHandle, addr + 128, caBundleData, caBundleData.Length, out var written);
+        if (written != caBundleData.Length)
+            throw new Exception("Did not write complete caBundle");
+
+        return (ulong)(addr + 64);
     }
 }

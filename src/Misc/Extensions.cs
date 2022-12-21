@@ -48,6 +48,7 @@ static class Extensions
         return 0;
     }
 
+    /// <returns>0 or (the address of the first matched byte + whatever baseOffset)</returns>
     public static long FindPattern(this byte[] data, short[] pattern, long baseOffset = 0) => FindPattern(data, pattern, 0L, baseOffset);
 
     public static HashSet<long> FindPattern(this byte[] data, short[] pattern, int maxMatches, long maxOffset)
@@ -74,4 +75,13 @@ static class Extensions
     }
 
     public static short[] ToPattern(this string data) => Encoding.UTF8.GetBytes(data).Select(b => (short)b).ToArray();
+
+    public static byte[] FillLeftoverWithNopUntilSize(this byte[] asm, int sizeToMatch)
+    {
+        int toBeAddedNops = sizeToMatch - asm.Length;
+        if (toBeAddedNops < 0)
+            throw new ArgumentException("Would need to fill negative amount nops");
+
+        return asm.Concat(Patches.Common.Noop(toBeAddedNops)).ToArray();
+    }
 }

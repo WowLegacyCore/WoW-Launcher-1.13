@@ -28,7 +28,7 @@ static class LaunchOptions
         GamePath,
         GameBinary,
         KeepCache,
-        UseStaticAuthSeed
+        UseStaticAuthSeed,
     };
 
     static Command ConfigureCommandLine(Command rootCommand)

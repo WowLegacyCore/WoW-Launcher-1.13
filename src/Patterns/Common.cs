@@ -10,7 +10,7 @@ static class Common
     public static short[] CryptoRsaModulus = { 0x71, 0xFD, 0xFA, 0x60, 0x14, 0x0D, 0xF2, 0x05 };
     public static short[] CryptoEdPublicKey = { 0x15, 0xD6, 0x18, 0xBD, 0x7D, 0xB5, 0x77, 0xBD };
 
-    public static short[] CertBundle = "{\"Created\":".ToPattern();
+    public static short[] CertBundleData = "{\"Created\":".ToPattern();
     public static short[] VersionUrl = "%s.patch.battle.net:1119/%s/versions".ToPattern();
     public static short[] Portal = ".actual.battle.net\0".ToPattern();
     public static short[] CommandLineHelp = "World of Warcraft usage".ToPattern();

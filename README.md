@@ -15,6 +15,8 @@ You can find signed binary releases at [Releases](https://github.com/Arctium/WoW
 * Shadowlands: 9.1.0, 9.1.5, 9.2.0, 9.2.5, 9.2.7 (implicit)
 * Classic: 2.5.2, 2.5.3, 2.5.4, 3.4.0 (--version Classic)
 * Classic Era: 1.14.x (--version ClassicEra)
+* Classic: 1.13.2 (--version ClassicEra132)
+* Classic: 1.13.x (--version ClassicEra133)
 
 ### Supported Game Versions (Windows ARM 64 bit)
 * Retail: Coming Soon

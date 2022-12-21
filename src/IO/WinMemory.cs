@@ -339,4 +339,25 @@ class WinMemory
     {
         return instructions[startIndex] == 0xE9 || instructions[startIndex] == 0xEB;
     }
+
+    public static (nint addr, Action<byte[]> writeAndLockCavePage) AllocateCodeCave(nint processHandle, int length)
+    {
+        var addr = VirtualAllocEx(processHandle, IntPtr.Zero, (uint)length, 0x00001000, 0x04);// PAGE_READWRITE
+
+        void WriteCodeFunc(byte[] asm)
+        {
+            if (asm.Length != length)
+                throw new ArgumentException("Length must match cave length");
+
+            WriteProcessMemory(processHandle, addr, asm, asm.Length, out var written);
+            if (written != length)
+                throw new Exception("Did not write complete caBundle");
+
+            
+            if (!NativeWindows.VirtualProtectEx(processHandle, addr, (uint)length, 0x20, out _))// PAGE_EXECUTE_READ
+                throw new Exception("Failed to set PAGE_EXECUTE_READ");
+        }
+        
+        return (addr, WriteCodeFunc);
+    }
 }
